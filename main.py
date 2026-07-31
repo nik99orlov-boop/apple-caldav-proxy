@@ -46,28 +46,43 @@ CALDAV_URL = os.environ.get("APPLE_CALDAV_URL", "https://caldav.icloud.com/")
 
 app = FastAPI(title="Apple CalDAV Proxy")
 
-_client: Optional[caldav.DAVClient] = None
-_calendar: Optional[caldav.Calendar] = None
+_calendar_url: Optional[str] = None
 
 
-def get_calendar() -> caldav.Calendar:
-    """Lazily connect and cache the calendar handle. Reconnects on first call after boot."""
-    global _client, _calendar
-    if _calendar is not None:
-        return _calendar
+def _new_client() -> caldav.DAVClient:
     # timeout=60: iCloud's CalDAV REPORT (date-search) queries are occasionally slow
     # to respond (observed hangs past the caldav library's 30s default), especially
     # right after a fresh connection. rate_limit_handle lets the library back off and
     # retry automatically if Apple responds with a rate-limit status instead of just
     # hanging.
-    _client = caldav.DAVClient(
+    return caldav.DAVClient(
         url=CALDAV_URL,
         username=APPLE_ID,
         password=APPLE_APP_PASSWORD,
         timeout=60,
         rate_limit_handle=True,
     )
-    principal = _client.principal()
+
+
+def get_calendar() -> caldav.Calendar:
+    """Return a Calendar handle backed by a brand-new connection every call.
+
+    Deliberately does NOT reuse a cached DAVClient/session across requests.
+    Observed in production: a single long-lived DAVClient's pooled connection
+    to caldav.icloud.com works for one request, then silently hangs forever
+    (no error, no response, no TCP reset) on every request after — the classic
+    stale-keepalive-connection failure mode. iCloud CalDAV apparently doesn't
+    play well with connection reuse from this kind of always-on client, and
+    the cost of a fresh TLS handshake per request (roughly 1-2s) is a fair
+    trade for never getting stuck on a dead connection. Only the discovered
+    calendar's URL is cached, to skip the extra principal()/calendars()
+    discovery round-trip on every call.
+    """
+    global _calendar_url
+    client = _new_client()
+    if _calendar_url is not None:
+        return caldav.Calendar(client=client, url=_calendar_url)
+    principal = client.principal()
     calendars = principal.calendars()
     if not calendars:
         raise RuntimeError("No calendars found for this Apple ID")
@@ -76,10 +91,11 @@ def get_calendar() -> caldav.Calendar:
         if not matches:
             available = ", ".join(c.name or "(unnamed)" for c in calendars)
             raise RuntimeError(f'Calendar "{CALENDAR_NAME}" not found. Available: {available}')
-        _calendar = matches[0]
+        chosen = matches[0]
     else:
-        _calendar = calendars[0]
-    return _calendar
+        chosen = calendars[0]
+    _calendar_url = str(chosen.url)
+    return chosen
 
 
 def check_token(x_proxy_token: str = Header(default="")):
