@@ -55,7 +55,18 @@ def get_calendar() -> caldav.Calendar:
     global _client, _calendar
     if _calendar is not None:
         return _calendar
-    _client = caldav.DAVClient(url=CALDAV_URL, username=APPLE_ID, password=APPLE_APP_PASSWORD)
+    # timeout=60: iCloud's CalDAV REPORT (date-search) queries are occasionally slow
+    # to respond (observed hangs past the caldav library's 30s default), especially
+    # right after a fresh connection. rate_limit_handle lets the library back off and
+    # retry automatically if Apple responds with a rate-limit status instead of just
+    # hanging.
+    _client = caldav.DAVClient(
+        url=CALDAV_URL,
+        username=APPLE_ID,
+        password=APPLE_APP_PASSWORD,
+        timeout=60,
+        rate_limit_handle=True,
+    )
     principal = _client.principal()
     calendars = principal.calendars()
     if not calendars:
