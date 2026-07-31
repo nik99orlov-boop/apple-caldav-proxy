@@ -245,6 +245,13 @@ def update_event(req: UpdateRequest, x_proxy_token: str = Header(default="")):
         comp = event.icalendar_component
         comp["dtstart"].dt = _to_utc(_parse_dt(req.new_start))
         comp["dtend"].dt = _to_utc(_parse_dt(req.new_end))
+        # Force an unconditional PUT: caldav normally sends If-Match with the
+        # ETag captured when the event was fetched, and iCloud was rejecting
+        # that as a stale precondition (412) even on a fresh fetch-then-save
+        # in the same request. This proxy is the only writer touching this
+        # calendar, so optimistic-concurrency checking isn't needed here.
+        event.etag = None
+        event.schedule_tag = None
         event.save()
         return {"ok": True}
     except HTTPException:
