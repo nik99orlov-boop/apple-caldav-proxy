@@ -29,7 +29,7 @@ Test against the real account as soon as this is deployed; see README.md.
 
 import os
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 import caldav
@@ -125,6 +125,27 @@ def _find_by_uid(calendar: caldav.Calendar, event_id: str):
         return None
 
 
+def _to_utc(dt: datetime) -> datetime:
+    """Normalize any offset-aware datetime to UTC before writing it into an ICS file.
+
+    Why: icalendar only knows how to write an unambiguous, named timezone for
+    tzinfo objects it recognizes (zoneinfo/pytz Olson zones). A plain fixed-offset
+    tzinfo (what datetime.fromisoformat("...+03:00") produces) has no zone name,
+    so icalendar silently drops the offset and writes a "floating" (timezone-less)
+    DTSTART/DTEND — Apple then stores the raw wall-clock numbers with no timezone
+    at all, which is why an event created for 15:00 MSK showed up as 18:00 when
+    read back and displayed in Moscow time. Converting to UTC first (and always
+    writing UTC, which icalendar encodes correctly as a trailing "Z") avoids this
+    entirely — every downstream reader converts a "Z" instant correctly regardless
+    of its own timezone.
+    """
+    if dt.tzinfo is None:
+        # No offset given at all — assume the caller meant Europe/Moscow (the only
+        # timezone this assistant is used from) rather than silently guessing UTC.
+        dt = dt.replace(tzinfo=timezone(timedelta(hours=3)))
+    return dt.astimezone(timezone.utc)
+
+
 def _build_ics(uid: str, summary: str, description: str, dtstart: datetime, dtend: datetime) -> str:
     """Build a minimal VEVENT by hand instead of relying on caldav's kwargs-based
     save_event() shortcut — that shortcut's exact accepted parameter set has changed
@@ -138,8 +159,8 @@ def _build_ics(uid: str, summary: str, description: str, dtstart: datetime, dten
     event.add("summary", summary)
     if description:
         event.add("description", description)
-    event.add("dtstart", dtstart)
-    event.add("dtend", dtend)
+    event.add("dtstart", _to_utc(dtstart))
+    event.add("dtend", _to_utc(dtend))
     event.add("dtstamp", datetime.now(timezone.utc))
     cal.add_component(event)
     return cal.to_ical().decode("utf-8")
@@ -195,8 +216,8 @@ def update_event(req: UpdateRequest, x_proxy_token: str = Header(default="")):
         if event is None:
             raise HTTPException(status_code=404, detail="Event not found")
         comp = event.icalendar_component
-        comp["dtstart"].dt = _parse_dt(req.new_start)
-        comp["dtend"].dt = _parse_dt(req.new_end)
+        comp["dtstart"].dt = _to_utc(_parse_dt(req.new_start))
+        comp["dtend"].dt = _to_utc(_parse_dt(req.new_end))
         event.save()
         return {"ok": True}
     except HTTPException:
