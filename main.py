@@ -34,6 +34,7 @@ from typing import Optional
 
 import caldav
 import icalendar
+from caldav.elements import cdav, dav
 from caldav.lib.error import NotFoundError
 from fastapi import FastAPI, Header, HTTPException
 from pydantic import BaseModel
@@ -250,8 +251,10 @@ def update_event(req: UpdateRequest, x_proxy_token: str = Header(default="")):
         # that as a stale precondition (412) even on a fresh fetch-then-save
         # in the same request. This proxy is the only writer touching this
         # calendar, so optimistic-concurrency checking isn't needed here.
-        event.etag = None
-        event.schedule_tag = None
+        # (etag/schedule_tag are read-only properties backed by event.props —
+        # there's no setter, so clear the underlying prop entries directly.)
+        event.props.pop(dav.GetEtag.tag, None)
+        event.props.pop(cdav.ScheduleTag.tag, None)
         event.save()
         return {"ok": True}
     except HTTPException:
