@@ -41,7 +41,7 @@ from pydantic import BaseModel
 # Bumped on every code change and echoed back by /health, purely so a redeploy can
 # be confirmed to have actually picked up new code (Render's dashboard has caused
 # real confusion about whether "Deploy latest commit" used the intended commit).
-PROXY_VERSION = "2026-07-31-update-delete-recreate"
+PROXY_VERSION = "2026-07-31-find-by-uid-datesearch"
 
 APPLE_ID = os.environ["APPLE_ID"]
 APPLE_APP_PASSWORD = os.environ["APPLE_APP_PASSWORD"]
@@ -151,10 +151,30 @@ def _event_to_dict(event) -> dict:
 
 
 def _find_by_uid(calendar: caldav.Calendar, event_id: str):
+    """Look up a single event by UID for update/delete.
+
+    Deliberately NOT using calendar.event_by_uid() (search(uid=..., ...)) here:
+    that sends a different REPORT query shape than plain date_search, and it
+    was reliably getting 412 Precondition Failed from iCloud on every call —
+    note the exception type was ReportError, i.e. the *lookup* itself was
+    failing, not the subsequent write, which is why nothing about the update
+    logic (in-place edit, clearing the ETag, reloading it, even delete+recreate)
+    ever made a difference: none of them ever got run. date_search is the exact
+    method /events/list already uses successfully, so reuse it here and filter
+    by UID client-side instead of trusting the UID-search REPORT variant.
+    """
+    now = datetime.now(timezone.utc)
+    wide_start = now - timedelta(days=730)
+    wide_end = now + timedelta(days=730)
     try:
-        return calendar.event_by_uid(event_id)
+        events = calendar.date_search(start=wide_start, end=wide_end, expand=True)
     except NotFoundError:
         return None
+    for e in events:
+        comp = e.icalendar_component
+        if str(comp.get("uid", "")) == event_id:
+            return e
+    return None
 
 
 def _to_utc(dt: datetime) -> datetime:
