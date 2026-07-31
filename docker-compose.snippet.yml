@@ -1,0 +1,19 @@
+# Add this service to the docker-compose.yml on the REG.RU server, alongside the
+# existing n8n service (see n8n-self-hosting-migration-2026-07-30.md in the project).
+# It does NOT need to be exposed to the public internet — only n8n needs to reach it,
+# so it stays on the same internal docker network as n8n and has no published port.
+
+services:
+  apple-caldav-proxy:
+    build: ./apple-caldav-proxy
+    container_name: apple-caldav-proxy
+    restart: unless-stopped
+    environment:
+      APPLE_ID: ${APPLE_ID}
+      APPLE_APP_PASSWORD: ${APPLE_APP_PASSWORD}
+      APPLE_CALENDAR_NAME: ${APPLE_CALENDAR_NAME:-}
+      PROXY_TOKEN: ${PROXY_TOKEN}
+    # No "ports:" on purpose — only reachable from other containers on the same
+    # docker network (e.g. from n8n via http://apple-caldav-proxy:8090).
+    networks:
+      - default
