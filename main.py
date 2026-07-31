@@ -29,10 +29,11 @@ Test against the real account as soon as this is deployed; see README.md.
 
 import os
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional
 
 import caldav
+import icalendar
 from caldav.lib.error import NotFoundError
 from fastapi import FastAPI, Header, HTTPException
 from pydantic import BaseModel
@@ -124,6 +125,26 @@ def _find_by_uid(calendar: caldav.Calendar, event_id: str):
         return None
 
 
+def _build_ics(uid: str, summary: str, description: str, dtstart: datetime, dtend: datetime) -> str:
+    """Build a minimal VEVENT by hand instead of relying on caldav's kwargs-based
+    save_event() shortcut — that shortcut's exact accepted parameter set has changed
+    across caldav library versions, so building the iCalendar text explicitly (via the
+    `icalendar` package, which has a stable well-documented API) is more predictable."""
+    cal = icalendar.Calendar()
+    cal.add("prodid", "-//apple-caldav-proxy//n8n//")
+    cal.add("version", "2.0")
+    event = icalendar.Event()
+    event.add("uid", uid)
+    event.add("summary", summary)
+    if description:
+        event.add("description", description)
+    event.add("dtstart", dtstart)
+    event.add("dtend", dtend)
+    event.add("dtstamp", datetime.now(timezone.utc))
+    cal.add_component(event)
+    return cal.to_ical().decode("utf-8")
+
+
 @app.get("/health")
 def health():
     try:
@@ -136,50 +157,65 @@ def health():
 @app.post("/events/list")
 def list_events(req: ListRequest, x_proxy_token: str = Header(default="")):
     check_token(x_proxy_token)
-    cal = get_calendar()
-    start = _parse_dt(req.date_from)
-    end = _parse_dt(req.date_to)
-    events = cal.date_search(start=start, end=end, expand=True)
-    return {"events": [_event_to_dict(e) for e in events]}
+    try:
+        cal = get_calendar()
+        start = _parse_dt(req.date_from)
+        end = _parse_dt(req.date_to)
+        events = cal.date_search(start=start, end=end, expand=True)
+        return {"events": [_event_to_dict(e) for e in events]}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"{type(e).__name__}: {e}")
 
 
 @app.post("/events/create")
 def create_event(req: CreateRequest, x_proxy_token: str = Header(default="")):
     check_token(x_proxy_token)
-    cal = get_calendar()
-    uid = str(uuid.uuid4())
-    start = _parse_dt(req.start)
-    end = _parse_dt(req.end)
-    cal.save_event(
-        dtstart=start,
-        dtend=end,
-        summary=req.title,
-        description=req.description or "",
-        uid=uid,
-    )
-    return {"id": uid, "title": req.title}
+    try:
+        cal = get_calendar()
+        uid = str(uuid.uuid4())
+        start = _parse_dt(req.start)
+        end = _parse_dt(req.end)
+        ics_text = _build_ics(uid, req.title, req.description or "", start, end)
+        cal.save_event(ics_text)
+        return {"id": uid, "title": req.title}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"{type(e).__name__}: {e}")
 
 
 @app.post("/events/update")
 def update_event(req: UpdateRequest, x_proxy_token: str = Header(default="")):
     check_token(x_proxy_token)
-    cal = get_calendar()
-    event = _find_by_uid(cal, req.id)
-    if event is None:
-        raise HTTPException(status_code=404, detail="Event not found")
-    comp = event.icalendar_component
-    comp["dtstart"].dt = _parse_dt(req.new_start)
-    comp["dtend"].dt = _parse_dt(req.new_end)
-    event.save()
-    return {"ok": True}
+    try:
+        cal = get_calendar()
+        event = _find_by_uid(cal, req.id)
+        if event is None:
+            raise HTTPException(status_code=404, detail="Event not found")
+        comp = event.icalendar_component
+        comp["dtstart"].dt = _parse_dt(req.new_start)
+        comp["dtend"].dt = _parse_dt(req.new_end)
+        event.save()
+        return {"ok": True}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"{type(e).__name__}: {e}")
 
 
 @app.post("/events/delete")
 def delete_event(req: DeleteRequest, x_proxy_token: str = Header(default="")):
     check_token(x_proxy_token)
-    cal = get_calendar()
-    event = _find_by_uid(cal, req.id)
-    if event is None:
-        raise HTTPException(status_code=404, detail="Event not found")
-    event.delete()
-    return {"ok": True}
+    try:
+        cal = get_calendar()
+        event = _find_by_uid(cal, req.id)
+        if event is None:
+            raise HTTPException(status_code=404, detail="Event not found")
+        event.delete()
+        return {"ok": True}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"{type(e).__name__}: {e}")
