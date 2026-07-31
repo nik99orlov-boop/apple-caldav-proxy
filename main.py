@@ -41,7 +41,7 @@ from pydantic import BaseModel
 # Bumped on every code change and echoed back by /health, purely so a redeploy can
 # be confirmed to have actually picked up new code (Render's dashboard has caused
 # real confusion about whether "Deploy latest commit" used the intended commit).
-PROXY_VERSION = "2026-07-31-update-etag-reload"
+PROXY_VERSION = "2026-07-31-update-delete-recreate"
 
 APPLE_ID = os.environ["APPLE_ID"]
 APPLE_APP_PASSWORD = os.environ["APPLE_APP_PASSWORD"]
@@ -247,19 +247,23 @@ def update_event(req: UpdateRequest, x_proxy_token: str = Header(default="")):
         event = _find_by_uid(cal, req.id)
         if event is None:
             raise HTTPException(status_code=404, detail="Event not found")
-        # _find_by_uid resolves the event via a REPORT/search query, not a plain
-        # GET — the ETag it captures from that XML multistatus response is
-        # apparently not always in the exact form iCloud expects back on a PUT's
-        # If-Match header (we confirmed a totally unconditional PUT, with no
-        # If-Match at all, still gets rejected with 412 — so Apple requires a
-        # matching ETag, and what we had wasn't it). Forcing an explicit reload
-        # (a plain GET) right before editing gets a freshly, correctly captured
-        # ETag straight from the HTTP response header.
-        event.load()
+        # In-place PUT (fetch, edit, event.save()) reliably gets 412 Precondition
+        # Failed from iCloud no matter what ETag we send it -- tried: the ETag
+        # caldav captured from the search/REPORT lookup, no ETag at all (a fully
+        # unconditional PUT), and a freshly reloaded ETag from an explicit plain
+        # GET immediately before saving. All three: same 412. Whatever iCloud is
+        # actually enforcing here isn't the documented ETag precondition, and
+        # isn't worth chasing further. Delete + recreate with the same UID
+        # sidesteps the whole thing -- both operations are already proven
+        # reliable on their own (see /events/create, /events/delete).
         comp = event.icalendar_component
-        comp["dtstart"].dt = _to_utc(_parse_dt(req.new_start))
-        comp["dtend"].dt = _to_utc(_parse_dt(req.new_end))
-        event.save()
+        title = str(comp.get("summary", ""))
+        description = str(comp.get("description", "") or "")
+        event.delete()
+        start = _parse_dt(req.new_start)
+        end = _parse_dt(req.new_end)
+        ics_text = _build_ics(req.id, title, description, start, end)
+        cal.save_event(ics_text)
         return {"ok": True}
     except HTTPException:
         raise
