@@ -41,7 +41,7 @@ from pydantic import BaseModel
 # Bumped on every code change and echoed back by /health, purely so a redeploy can
 # be confirmed to have actually picked up new code (Render's dashboard has caused
 # real confusion about whether "Deploy latest commit" used the intended commit).
-PROXY_VERSION = "2026-07-31-find-by-uid-datesearch"
+PROXY_VERSION = "2026-07-31-find-by-uid-narrow-range"
 
 APPLE_ID = os.environ["APPLE_ID"]
 APPLE_APP_PASSWORD = os.environ["APPLE_APP_PASSWORD"]
@@ -163,9 +163,15 @@ def _find_by_uid(calendar: caldav.Calendar, event_id: str):
     method /events/list already uses successfully, so reuse it here and filter
     by UID client-side instead of trusting the UID-search REPORT variant.
     """
+    # A +/-730 day window (the first thing tried) made this query heavy enough
+    # that Apple's server stopped responding at all ("keepalive timeout") instead
+    # of the earlier 412. move/delete are only ever used on events found via a
+    # recent /events/list call in the same conversation turn, so a narrower,
+    # cheaper window covering "recent past to a bit less than a year ahead" is
+    # plenty and much less likely to time out.
     now = datetime.now(timezone.utc)
-    wide_start = now - timedelta(days=730)
-    wide_end = now + timedelta(days=730)
+    wide_start = now - timedelta(days=30)
+    wide_end = now + timedelta(days=180)
     try:
         events = calendar.date_search(start=wide_start, end=wide_end, expand=True)
     except NotFoundError:
