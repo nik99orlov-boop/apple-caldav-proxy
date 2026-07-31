@@ -34,10 +34,14 @@ from typing import Optional
 
 import caldav
 import icalendar
-from caldav.elements import cdav, dav
 from caldav.lib.error import NotFoundError
 from fastapi import FastAPI, Header, HTTPException
 from pydantic import BaseModel
+
+# Bumped on every code change and echoed back by /health, purely so a redeploy can
+# be confirmed to have actually picked up new code (Render's dashboard has caused
+# real confusion about whether "Deploy latest commit" used the intended commit).
+PROXY_VERSION = "2026-07-31-update-etag-reload"
 
 APPLE_ID = os.environ["APPLE_ID"]
 APPLE_APP_PASSWORD = os.environ["APPLE_APP_PASSWORD"]
@@ -198,7 +202,7 @@ def _build_ics(uid: str, summary: str, description: str, dtstart: datetime, dten
 def health():
     try:
         cal = get_calendar()
-        return {"ok": True, "calendar": cal.name}
+        return {"ok": True, "calendar": cal.name, "version": PROXY_VERSION}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -243,18 +247,18 @@ def update_event(req: UpdateRequest, x_proxy_token: str = Header(default="")):
         event = _find_by_uid(cal, req.id)
         if event is None:
             raise HTTPException(status_code=404, detail="Event not found")
+        # _find_by_uid resolves the event via a REPORT/search query, not a plain
+        # GET — the ETag it captures from that XML multistatus response is
+        # apparently not always in the exact form iCloud expects back on a PUT's
+        # If-Match header (we confirmed a totally unconditional PUT, with no
+        # If-Match at all, still gets rejected with 412 — so Apple requires a
+        # matching ETag, and what we had wasn't it). Forcing an explicit reload
+        # (a plain GET) right before editing gets a freshly, correctly captured
+        # ETag straight from the HTTP response header.
+        event.load()
         comp = event.icalendar_component
         comp["dtstart"].dt = _to_utc(_parse_dt(req.new_start))
         comp["dtend"].dt = _to_utc(_parse_dt(req.new_end))
-        # Force an unconditional PUT: caldav normally sends If-Match with the
-        # ETag captured when the event was fetched, and iCloud was rejecting
-        # that as a stale precondition (412) even on a fresh fetch-then-save
-        # in the same request. This proxy is the only writer touching this
-        # calendar, so optimistic-concurrency checking isn't needed here.
-        # (etag/schedule_tag are read-only properties backed by event.props —
-        # there's no setter, so clear the underlying prop entries directly.)
-        event.props.pop(dav.GetEtag.tag, None)
-        event.props.pop(cdav.ScheduleTag.tag, None)
         event.save()
         return {"ok": True}
     except HTTPException:
